@@ -25,8 +25,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Point;
 import android.os.Bundle;
-import android.view.ContextMenu;
-import android.view.ContextMenu.ContextMenuInfo;
+import android.text.Html;
 import android.view.Display;
 import android.view.KeyEvent;
 import android.view.Menu;
@@ -37,12 +36,11 @@ import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.animation.AccelerateInterpolator;
-import android.widget.AdapterView;
-import android.widget.AdapterView.OnItemClickListener;
-import android.widget.BaseAdapter;
-import android.widget.ListView;
+import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.PopupMenu.OnMenuItemClickListener;
+import android.widget.ScrollView;
+import android.widget.TextView;
 
 import com.android.calculator2.view.CalculatorDisplay;
 import com.android.calculator2.view.CalculatorViewPager;
@@ -50,14 +48,15 @@ import com.android.calculator2.view.Cling;
 import com.android.calculator2.view.HistoryLine;
 import com.xlythe.slider.Slider;
 import com.xlythe.slider.Slider.Direction;
+import com.xlythe.slider.Slider.OnSlideListener;
 
 public class Calculator extends Activity implements Logic.Listener, OnClickListener, OnMenuItemClickListener, CalculatorViewPager.OnPageChangeListener {
     public EventListener mListener = new EventListener();
     private CalculatorDisplay mDisplay;
     private Persist mPersist;
     private History mHistory;
-    private ListView mHistoryView;
-    private BaseAdapter mHistoryAdapter;
+    private LinearLayout mHistoryView;
+    private ScrollView mHistoryViewParent;
     private Logic mLogic;
     private CalculatorViewPager mPager;
     private CalculatorViewPager mSmallPager;
@@ -68,7 +67,10 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
     private Slider mPulldown;
     private Graph mGraph;
 
+    private EquationFormatter mEquationFormatter;
+
     private boolean clingActive = false;
+    private Direction previousDirection = Direction.DOWN;
 
     public enum Panel {
         GRAPH, FUNCTION, HEX, BASIC, ADVANCED, MATRIX;
@@ -123,17 +125,12 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
         // Disable IME for this application
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM, WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
 
-        int sliderBackground = R.color.background;
-        if(CalculatorSettings.useLightTheme(getContext())) {
-            super.setTheme(R.style.Theme_Calculator_Light);
-            sliderBackground = R.color.background_light;
-        }
-
         setContentView(R.layout.main);
-
         mPager = (CalculatorViewPager) findViewById(R.id.panelswitch);
         mSmallPager = (CalculatorViewPager) findViewById(R.id.smallPanelswitch);
         mLargePager = (CalculatorViewPager) findViewById(R.id.largePanelswitch);
+
+        mEquationFormatter = new EquationFormatter();
 
         if(mClearButton == null) {
             mClearButton = findViewById(R.id.clear);
@@ -149,30 +146,36 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
         mPersist = new Persist(this);
         mPersist.load();
 
-        mHistory = mPersist.mHistory;
+        mHistory = mPersist.history;
 
         mDisplay = (CalculatorDisplay) findViewById(R.id.display);
-
-        mLogic = new Logic(this, mHistory, mDisplay);
-        mLogic.setListener(this);
-        if(mPersist.getMode() != null) mLogic.mBaseModule.setMode(mPersist.getMode());
-
-        mLogic.setDeleteMode(mPersist.getDeleteMode());
-        mLogic.setLineLength(mDisplay.getMaxDigits());
-
-        mHistoryAdapter = new HistoryAdapter(this, mHistory);
-        mHistory.setObserver(mHistoryAdapter);
 
         mPulldown = (Slider) findViewById(R.id.pulldown);
         mPulldown.setBarHeight(getResources().getDimensionPixelSize(R.dimen.history_bar_height));
         mPulldown.setSlideDirection(Direction.DOWN);
-        if(CalculatorSettings.clickToOpenHistory(this)) {
-            mPulldown.enableClick(true);
-            mPulldown.enableTouch(false);
-        }
-        mPulldown.setBackgroundResource(sliderBackground);
-        mHistoryView = (ListView) mPulldown.findViewById(R.id.history);
+        mPulldown.setOnSlideListener(new OnSlideListener() {
+            @Override
+            public void onSlide(Direction d) {
+                if(!previousDirection.equals(d) && d.equals(Direction.UP)) {
+                    setUpHistory();
+                }
+                previousDirection = d;
+            }
+        });
+        mPulldown.setBackgroundResource(R.color.background);
+        mHistoryView = (LinearLayout) mPulldown.findViewById(R.id.history);
+        mHistoryViewParent = (ScrollView) mHistoryView.getParent();
         setUpHistory();
+
+        mLogic = new Logic(this, mHistory, mDisplay);
+        mLogic.setListener(this);
+        if(mPersist.getMode() != null) mLogic.setMode(mPersist.getMode());
+
+        mLogic.setDeleteMode(mPersist.getDeleteMode());
+        mLogic.setLineLength(mDisplay.getMaxDigits());
+
+        HistoryAdapter historyAdapter = new HistoryAdapter(this, mHistory, mLogic);
+        mHistory.setObserver(historyAdapter);
 
         mGraph = new Graph(mLogic);
 
@@ -181,7 +184,6 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
             mPager.setCurrentItem(state == null ? Panel.BASIC.getOrder() : state.getInt(STATE_CURRENT_VIEW, Panel.BASIC.getOrder()));
             mPager.setOnPageChangeListener(this);
             runCling(false);
-            mListener.setHandler(this, mLogic, mPager);
         }
         else if(mSmallPager != null && mLargePager != null) {
             // Expanded UI
@@ -192,9 +194,9 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
             mSmallPager.setOnPageChangeListener(this);
             mLargePager.setOnPageChangeListener(this);
             runCling(false);
-            mListener.setHandler(this, mLogic, mSmallPager, mLargePager);
         }
 
+        mListener.setHandler(this, mLogic, mPager);
         mDisplay.setOnKeyListener(mListener);
 
         if(!ViewConfiguration.get(this).hasPermanentMenuKey()) {
@@ -258,12 +260,6 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
         MenuItem mHexPanel = menu.findItem(R.id.hex);
         if(mHexPanel != null) mHexPanel.setVisible(!getHexVisibility() && CalculatorSettings.hexPanel(getContext()) && !mPulldown.isSliderOpen());
 
-        MenuItem mLock = menu.findItem(R.id.lock);
-        if(mLock != null) mLock.setVisible(getGraphVisibility() && getPagingEnabled());
-
-        MenuItem mUnlock = menu.findItem(R.id.unlock);
-        if(mUnlock != null) mUnlock.setVisible(getGraphVisibility() && !getPagingEnabled());
-
         return true;
     }
 
@@ -289,7 +285,6 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
 
     private PopupMenu constructPopupMenu() {
         final PopupMenu popupMenu = new PopupMenu(this, mOverflowMenuButton);
-        mOverflowMenuButton.setOnTouchListener(popupMenu.getDragToOpenListener());
         final Menu menu = popupMenu.getMenu();
         popupMenu.inflate(R.menu.menu);
         popupMenu.setOnMenuItemClickListener(this);
@@ -370,7 +365,7 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
         case R.id.clear_history:
             mHistory.clear();
             mLogic.onClear();
-            mHistoryAdapter.notifyDataSetInvalidated();
+            mHistoryView.removeAllViews();
             break;
 
         case R.id.show_history:
@@ -423,17 +418,10 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
             }
             break;
 
-        case R.id.lock:
-            setPagingEnabled(false);
-            break;
-
-        case R.id.unlock:
-            setPagingEnabled(true);
-            break;
-
         case R.id.settings:
-            startActivity(new Intent(this, Preferences.class));
-            finish();
+            Intent intent = new Intent(this, Preferences.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            startActivity(intent);
             break;
         }
         return super.onOptionsItemSelected(item);
@@ -461,7 +449,7 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
         super.onPause();
         mLogic.updateHistory();
         mPersist.setDeleteMode(mLogic.getDeleteMode());
-        mPersist.setMode(mLogic.mBaseModule.getMode());
+        mPersist.setMode(mLogic.getMode());
         mPersist.save();
     }
 
@@ -481,9 +469,6 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
             mLargePager.setCurrentItem(LargePanel.BASIC.getOrder());
             return true;
         }
-        else if(keyCode == KeyEvent.KEYCODE_BACK) {
-            finish();
-        }
         return super.onKeyDown(keyCode, keyEvent);
     }
 
@@ -493,27 +478,25 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
     }
 
     private void setUpHistory() {
-        registerForContextMenu(mHistoryView);
-        mHistoryView.setAdapter(mHistoryAdapter);
-        mHistoryView.setTranscriptMode(ListView.TRANSCRIPT_MODE_ALWAYS_SCROLL);
-        mHistoryView.setStackFromBottom(true);
-        mHistoryView.setFocusable(false);
-        mHistoryView.setOnItemClickListener(new OnItemClickListener() {
+        mHistoryView.removeAllViews();
+        for(HistoryEntry he : mHistory.mEntries) {
+            if(!he.getBase().isEmpty()) {
+                HistoryLine entry = (HistoryLine) View.inflate(getContext(), R.layout.history_entry, null);
+                entry.setHistoryEntry(he);
+                entry.setHistory(mHistory);
+                TextView base = (TextView) entry.findViewById(R.id.base);
+                base.setText(Html.fromHtml(mEquationFormatter.insertSupscripts(he.getBase())));
+                TextView edited = (TextView) entry.findViewById(R.id.edited);
+                edited.setText(he.getEdited());
+                mHistoryView.addView(entry);
+            }
+        }
+        mHistoryViewParent.post(new Runnable() {
             @Override
-            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                int deleteMode = mLogic.getDeleteMode();
-                if(mDisplay.getText().isEmpty()) deleteMode = Logic.DELETE_MODE_CLEAR;
-                mDisplay.insert(((HistoryLine) view).getHistoryEntry().getEdited());
-                mLogic.setDeleteMode(deleteMode);
+            public void run() {
+                mHistoryViewParent.fullScroll(View.FOCUS_DOWN);
             }
         });
-    }
-
-    @Override
-    public void onCreateContextMenu(ContextMenu menu, View v, ContextMenuInfo menuInfo) {
-        AdapterView.AdapterContextMenuInfo info = (AdapterView.AdapterContextMenuInfo) menuInfo;
-        View history = mHistoryAdapter.getView(info.position, null, null);
-        if(history instanceof HistoryLine) ((HistoryLine) history).onCreateContextMenu(menu);
     }
 
     private Context getContext() {
@@ -528,7 +511,9 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
     }
 
     private Cling initCling(int clingId, int[] positionData, float revealRadius, boolean showHand, boolean animate) {
-        setPagingEnabled(false);
+        if(mPager != null) mPager.setPagingEnabled(false);
+        if(mSmallPager != null) mSmallPager.setPagingEnabled(false);
+        if(mLargePager != null) mLargePager.setPagingEnabled(false);
         clingActive = true;
 
         Cling cling = (Cling) findViewById(clingId);
@@ -549,7 +534,9 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
     }
 
     private void dismissCling(final Cling cling, final String flag, int duration) {
-        setPagingEnabled(true);
+        if(mPager != null) mPager.setPagingEnabled(true);
+        if(mSmallPager != null) mSmallPager.setPagingEnabled(true);
+        if(mLargePager != null) mLargePager.setPagingEnabled(true);
         clingActive = false;
 
         if(cling != null) {
@@ -557,7 +544,6 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
             ObjectAnimator anim = ObjectAnimator.ofFloat(cling, "alpha", 0f);
             anim.setDuration(duration);
             anim.addListener(new AnimatorListenerAdapter() {
-                @Override
                 public void onAnimationEnd(Animator animation) {
                     cling.setVisibility(View.GONE);
                     cling.cleanup();
@@ -569,7 +555,9 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
     }
 
     private void removeCling(int id) {
-        setPagingEnabled(true);
+        if(mPager != null) mPager.setPagingEnabled(true);
+        if(mSmallPager != null) mSmallPager.setPagingEnabled(true);
+        if(mLargePager != null) mLargePager.setPagingEnabled(true);
         clingActive = false;
 
         final View cling = findViewById(id);
@@ -685,25 +673,9 @@ public class Calculator extends Activity implements Logic.Listener, OnClickListe
         }
     }
 
-    private void setPagingEnabled(boolean enabled) {
-        if(mPager != null) mPager.setPagingEnabled(enabled);
-        if(mSmallPager != null) mSmallPager.setPagingEnabled(enabled);
-        if(mLargePager != null) mLargePager.setPagingEnabled(enabled);
-    }
-
-    private boolean getPagingEnabled() {
-        if(mPager != null) return mPager.getPagingEnabled();
-        if(mSmallPager != null) return mSmallPager.getPagingEnabled();
-        if(mLargePager != null) return mLargePager.getPagingEnabled();
-        return true;
-    }
-
     @Override
     public void onPageScrollStateChanged(int state) {
-        if(state == 0) {
-            setPagingEnabled(true);
-            runCling(true);
-        }
+        if(state == 0) runCling(true);
     }
 
     @Override
